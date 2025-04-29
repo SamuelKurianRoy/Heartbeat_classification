@@ -18,7 +18,7 @@ st.set_page_config(
 
 # --- Model Definition: ResNet + LSTM ---
 class ResNetLSTM(nn.Module):
-    def __init__(self, hidden_size=128, num_classes=3):
+    def __init__(self, hidden_size=256, num_classes=3):
         super(ResNetLSTM, self).__init__()
 
         # Load pre-trained ResNet but modify for grayscale input
