@@ -2,12 +2,14 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import numpy as np
+# Use headless OpenCV to avoid libGL dependency issues
 import cv2
 from torchvision import models, transforms
 from PIL import Image
 import io
 from scipy.signal import spectrogram
 import matplotlib.pyplot as plt
+import os
 
 # Set page config
 st.set_page_config(
@@ -18,7 +20,7 @@ st.set_page_config(
 
 # --- Model Definition: ResNet + LSTM ---
 class ResNetLSTM(nn.Module):
-    def __init__(self, hidden_size=256, num_classes=3):
+    def __init__(self, hidden_size=128, num_classes=3):
         super(ResNetLSTM, self).__init__()
 
         # Load pre-trained ResNet but modify for grayscale input
@@ -47,7 +49,7 @@ class ResNetLSTM(nn.Module):
         out = self.fc(lstm_out[:, -1, :])  # Shape: [batch_size, num_classes]
         return out
 
-# --- Spectrogram Processing Functions ---
+# --- Safer Spectrogram Processing Functions ---
 def preprocess_image(image):
     """Preprocess ECG image to remove grid lines and noise"""
     # Convert PIL Image to numpy array if needed
@@ -58,50 +60,66 @@ def preprocess_image(image):
     else:
         raise TypeError("Image must be PIL Image or numpy array")
     
-    # Apply adaptive thresholding to get binary image
-    binary = cv2.adaptiveThreshold(
-        img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 11, 2
-    )
+    try:
+        # Apply adaptive thresholding to get binary image
+        binary = cv2.adaptiveThreshold(
+            img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
 
-    # Remove horizontal lines
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-    detected_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
-    cnts = cv2.findContours(detected_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    for c in cnts:
-        cv2.drawContours(binary, [c], -1, 0, -1)
+        # Remove horizontal lines
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        detected_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+        cnts = cv2.findContours(detected_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+        for c in cnts:
+            cv2.drawContours(binary, [c], -1, 0, -1)
 
-    # Remove vertical lines
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-    detected_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
-    cnts = cv2.findContours(detected_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    for c in cnts:
-        cv2.drawContours(binary, [c], -1, 0, -1)
-
-    return binary
+        # Remove vertical lines
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+        detected_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+        cnts = cv2.findContours(detected_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+        for c in cnts:
+            cv2.drawContours(binary, [c], -1, 0, -1)
+            
+        return binary
+    except Exception as e:
+        st.error(f"Error in preprocessing image: {e}")
+        # Return the original image converted to binary as fallback
+        _, binary_img = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+        return binary_img
 
 def extract_waveform(binary_img):
     """Extract 1D signal from binary image"""
-    height, width = binary_img.shape
-    signal = []
-    for x in range(width):
-        column = binary_img[:, x]
-        if np.any(column):
-            y = np.argmax(column)
-            signal.append(height - y)  # Invert Y to get proper waveform orientation
-        else:
-            signal.append(signal[-1] if signal else 0)  # Continue last value if no signal
-    return np.array(signal)
+    try:
+        height, width = binary_img.shape
+        signal = []
+        for x in range(width):
+            column = binary_img[:, x]
+            if np.any(column):
+                y = np.argmax(column)
+                signal.append(height - y)  # Invert Y to get proper waveform orientation
+            else:
+                signal.append(signal[-1] if signal else 0)  # Continue last value if no signal
+        return np.array(signal)
+    except Exception as e:
+        st.error(f"Error extracting waveform: {e}")
+        # Return dummy signal as fallback
+        return np.zeros(binary_img.shape[1])
 
 def get_spectrogram(signal, fs=500):
     """Convert 1D signal to spectrogram image"""
-    f, t, Sxx = spectrogram(signal, fs)
-    Sxx_log = 10 * np.log10(Sxx + 1e-8)  # Convert to dB with small offset to avoid log(0)
-    Sxx_log = np.clip(Sxx_log, a_min=Sxx_log.min(), a_max=Sxx_log.max())
-    spectro_img = cv2.normalize(Sxx_log, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    return spectro_img
+    try:
+        f, t, Sxx = spectrogram(signal, fs)
+        Sxx_log = 10 * np.log10(Sxx + 1e-8)  # Convert to dB with small offset to avoid log(0)
+        Sxx_log = np.clip(Sxx_log, a_min=Sxx_log.min(), a_max=Sxx_log.max())
+        spectro_img = cv2.normalize(Sxx_log, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return spectro_img
+    except Exception as e:
+        st.error(f"Error generating spectrogram: {e}")
+        # Return blank image as fallback
+        return np.zeros((224, 224), dtype=np.uint8)
 
 def process_ecg_image(image):
     """Process ECG image through preprocessing pipeline"""
@@ -124,9 +142,30 @@ def process_ecg_image(image):
     
     return binary, waveform, spectro_img
 
+# --- Check model file existence ---
+def model_file_exists():
+    """Check if model file exists in various possible locations"""
+    possible_locations = [
+        "best_ecg_model.pth",
+        "./best_ecg_model.pth",
+        "../best_ecg_model.pth",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_ecg_model.pth")
+    ]
+    
+    for location in possible_locations:
+        if os.path.exists(location):
+            return location
+    
+    return None
+
 # --- Streamlit App ---
 def main():
     st.title("🫀 ECG Image Classifier")
+    
+    # Check model existence
+    model_path = model_file_exists()
+    if model_path is None:
+        st.warning("⚠️ Model file 'best_ecg_model.pth' not found. Prediction functionality will be limited.")
     
     # Create two columns for layout
     col1, col2 = st.columns([1, 1])
@@ -136,33 +175,36 @@ def main():
         uploaded_file = st.file_uploader("Choose an ECG image file", type=["jpg", "jpeg", "png"])
         
         if uploaded_file is not None:
-            # Display original image
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Original ECG Image", use_column_width=True)
-            
-            # Process image through pipeline
-            with st.spinner("Processing image..."):
-                binary, waveform, spectro_img = process_ecg_image(image)
-            
-            # Display processed versions
-            st.subheader("Processed Images")
-            # Create tabs for different visualizations
-            tab1, tab2, tab3 = st.tabs(["Binary Image", "Waveform", "Spectrogram"])
-            
-            with tab1:
-                st.image(binary, caption="Binary Image (Grid Removed)", use_column_width=True)
-            
-            with tab2:
-                # Plot waveform
-                fig, ax = plt.subplots(figsize=(10, 4))
-                ax.plot(waveform)
-                ax.set_title("Extracted ECG Waveform")
-                ax.set_xlabel("Time (samples)")
-                ax.set_ylabel("Amplitude")
-                st.pyplot(fig)
-            
-            with tab3:
-                st.image(spectro_img, caption="Spectrogram Image", use_column_width=True)
+            try:
+                # Display original image
+                image = Image.open(uploaded_file)
+                st.image(image, caption="Original ECG Image", use_column_width=True)
+                
+                # Process image through pipeline
+                with st.spinner("Processing image..."):
+                    binary, waveform, spectro_img = process_ecg_image(image)
+                
+                # Display processed versions
+                st.subheader("Processed Images")
+                # Create tabs for different visualizations
+                tab1, tab2, tab3 = st.tabs(["Binary Image", "Waveform", "Spectrogram"])
+                
+                with tab1:
+                    st.image(binary, caption="Binary Image (Grid Removed)", use_column_width=True)
+                
+                with tab2:
+                    # Plot waveform
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.plot(waveform)
+                    ax.set_title("Extracted ECG Waveform")
+                    ax.set_xlabel("Time (samples)")
+                    ax.set_ylabel("Amplitude")
+                    st.pyplot(fig)
+                
+                with tab3:
+                    st.image(spectro_img, caption="Spectrogram Image", use_column_width=True)
+            except Exception as e:
+                st.error(f"Error processing image: {e}")
     
     with col2:
         st.header("Prediction")
@@ -188,35 +230,38 @@ def main():
             
             # Load model if button clicked
             if st.button("Predict"):
-                with st.spinner("Loading model and making prediction..."):
-                    try:
-                        # Initialize model
-                        model = ResNetLSTM(num_classes=len(class_names))
-                        
-                        # Load weights
-                        model.load_state_dict(torch.load("best_ecg_model.pth", map_location=device))
-                        model.to(device)
-                        model.eval()
-                        
-                        # Make prediction
-                        input_tensor = input_tensor.to(device)
-                        with torch.no_grad():
-                            outputs = model(input_tensor)
-                            probs = torch.nn.functional.softmax(outputs, dim=1)[0]
-                            pred_idx = torch.argmax(probs).item()
+                if model_path is None:
+                    st.error("Model file not found. Please make sure 'best_ecg_model.pth' is in the application directory.")
+                else:
+                    with st.spinner("Loading model and making prediction..."):
+                        try:
+                            # Initialize model
+                            model = ResNetLSTM(num_classes=len(class_names))
                             
-                        # Display prediction result
-                        st.success(f"## Prediction: {class_names[pred_idx]}")
-                        
-                        # Display confidence for each class
-                        st.subheader("Confidence Scores")
-                        for i, (cls, prob) in enumerate(zip(class_names, probs.cpu().numpy())):
-                            st.progress(float(prob))
-                            st.write(f"{cls}: {prob*100:.2f}%")
+                            # Load weights
+                            model.load_state_dict(torch.load(model_path, map_location=device))
+                            model.to(device)
+                            model.eval()
                             
-                    except Exception as e:
-                        st.error(f"Error in prediction: {e}")
-                        st.info("Make sure you have placed the model file 'best_ecg_model.pth' in the same directory as this app.")
+                            # Make prediction
+                            input_tensor = input_tensor.to(device)
+                            with torch.no_grad():
+                                outputs = model(input_tensor)
+                                probs = torch.nn.functional.softmax(outputs, dim=1)[0]
+                                pred_idx = torch.argmax(probs).item()
+                                
+                            # Display prediction result
+                            st.success(f"## Prediction: {class_names[pred_idx]}")
+                            
+                            # Display confidence for each class
+                            st.subheader("Confidence Scores")
+                            for i, (cls, prob) in enumerate(zip(class_names, probs.cpu().numpy())):
+                                st.progress(float(prob))
+                                st.write(f"{cls}: {prob*100:.2f}%")
+                                
+                        except Exception as e:
+                            st.error(f"Error in prediction: {e}")
+                            st.info("Make sure your model file is compatible with the defined architecture.")
         else:
             st.info("Upload an ECG image to get a prediction.")
     
@@ -237,14 +282,11 @@ def main():
         """
     )
     
-    # Technical details
-    with st.sidebar.expander("Technical Details"):
-        st.write("""
-        - **Model Architecture**: ResNet18 + LSTM
-        - **Input Size**: 224x224 grayscale image
-        - **Classes**: 3 (Normal, Abnormal, Heart Attack)
-        - **Preprocessing**: Grid removal, signal extraction, spectrogram generation
-        """)
+    # System info
+    with st.sidebar.expander("System Information"):
+        st.write(f"- **Device**: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+        st.write(f"- **Model Path**: {model_path if model_path else 'Not found'}")
+        st.write(f"- **Python Version**: {torch.__version__}")
 
 if __name__ == "__main__":
     main()
