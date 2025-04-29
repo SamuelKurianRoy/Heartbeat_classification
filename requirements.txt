@@ -2,3 +2,9 @@ streamlit
 torch
 torchvision
 Pillow
+numpy
+opencv-python
+scipy
+matplotlib
+pandas
+scikit-learn
